@@ -169,6 +169,15 @@ class AdSkipService : AccessibilityService() {
     private var lastScanAt = 0L
     private var lastClickAt = 0L
 
+    /**
+     * v1.11：会话切换两步确认闸门（[SessionGate]）。
+     *
+     * state 事件只挂起候选，不立即切换会话；扫描时用真实窗口根节点包名做
+     * 证据确认/否决。这是 GKD `ForegroundTracker` 的通用机制，替代 v1.10
+     * 硬编码桌面包名的修法——任何 ROM、任何"会捣乱的系统包"都走同一路径。
+     */
+    private var gate = SessionGate.initial()
+
     /** 本会话内每个「目标签名」尝试了几次、最近一次尝试时间。签名用「包名|关键词」。 */
     private val attemptsByTarget = HashMap<String, Int>()
     private val lastAttemptAtByTarget = HashMap<String, Long>()
@@ -268,6 +277,12 @@ class AdSkipService : AccessibilityService() {
                 if (evTime > 0L && lastStateEventTime > 0L && evTime < lastStateEventTime) return
                 if (evTime > 0L) lastStateEventTime = evTime
 
+                // v1.11：会话切换走两步确认（SessionGate）。
+                //  - 回桌面（isLauncher）仍然立即清会话——这是明确的用户意图；
+                //  - 排除包/非 Activity 类事件仍然 IGNORE——不挂起，不给劫持留门；
+                //  - 其它包的 state 事件只**挂起**为候选，等扫描时用真实窗口
+                //    根节点包名做证据再确认切换。迟到的桌面残留事件会被证据
+                //    自然否决（真机实锤：hiboard 事件曾劫持正在验证点击的会话）。
                 val action = SplashPolicy.onWindowState(
                     pkg = pkg,
                     excluded = isExcludedPackage(pkg),
@@ -279,7 +294,13 @@ class AdSkipService : AccessibilityService() {
                 )
                 when (action) {
                     SplashPolicy.Action.CLEAR -> if (sessionPkg != null) clearSession()
-                    SplashPolicy.Action.START -> if (pkg != null) startSession(pkg, activity)
+                    SplashPolicy.Action.START -> {
+                        if (pkg != null && pkg != sessionPkg) {
+                            // 挂起候选，不立即切换；证据在 scanOnce 里确认。
+                            gate = SessionGate.onWindowState(gate, pkg, SystemClock.uptimeMillis())
+                            Log.i(TAG, "会话切换挂起待证据: $sessionPkg → $pkg")
+                        }
+                    }
                     // 同一个 App 的 Activity 切换：续上时间窗，保证晚渲染的广告也能被打到。
                     SplashPolicy.Action.CONTINUE -> extendSession()
                     SplashPolicy.Action.IGNORE -> Unit
@@ -335,8 +356,12 @@ class AdSkipService : AccessibilityService() {
 
         val now = SystemClock.uptimeMillis()
         when {
+            // v1.11：换包不再立即开会话——挂起等窗口证据（reconcileSessionWithWindows
+            // 在每次扫描时确认）。同包的三种情形仍然直接开会话/续窗。
+            sessionPkg != pkg -> {
+                gate = SessionGate.onWindowState(gate, pkg, now)
+            }
             sessionPkg == null -> startSession(pkg, "")
-            sessionPkg != pkg -> startSession(pkg, "")
             !sessionActive() && totalAttempts > 0 &&
                 now - lastClickAt > SESSION_RESET_QUIET_MS -> startSession(pkg, "")
         }
@@ -444,6 +469,7 @@ class AdSkipService : AccessibilityService() {
         sessionPkg = pkg
         sessionActivity = activity
         sessionStartAt = SystemClock.uptimeMillis()
+        gate = SessionGate.initial(pkg)
         lastScanAt = 0L
         lastClickAt = 0L
         attemptsByTarget.clear()
@@ -478,6 +504,7 @@ class AdSkipService : AccessibilityService() {
         sessionPkg = null
         sessionStartAt = 0L
         sessionActivity = ""
+        gate = SessionGate.initial()
         lastScanAt = 0L
         lastClickAt = 0L
         attemptsByTarget.clear()
@@ -584,9 +611,50 @@ class AdSkipService : AccessibilityService() {
         }
     }
 
+    /**
+     * v1.11：用真实窗口根节点包名做证据，确认/否决挂起的会话切换（[SessionGate]）。
+     *
+     * - 活动窗口的根节点包名 == 挂起候选 → 确认切换（startSession）；
+     * - == 当前会话包 → 否决挂起（迟到的桌面/浮层劫持事件被自然丢弃）；
+     * - 是别的非排除包 → 证据优先，直接切换（窗口先于事件出现的 ROM）；
+     * - 挂起超时（窗口一直读不到根节点）→ 自动确认，会话不会卡死。
+     */
+    private fun reconcileSessionWithWindows() {
+        val now = SystemClock.uptimeMillis()
+
+        // 证据：活动窗口（或 rootInActiveWindow）的根节点包名。
+        val evidence = runCatching {
+            rootInActiveWindow?.packageName?.toString()
+        }.getOrNull()
+
+        var confirmedPkg: String? = null
+        if (!evidence.isNullOrEmpty() && !isExcludedPackage(evidence)) {
+            val (s, confirmed) = SessionGate.onWindowEvidence(gate, evidence, now)
+            gate = s
+            confirmedPkg = confirmed
+        }
+
+        // 超时兜底确认。
+        if (confirmedPkg == null) {
+            val (s, timeoutConfirmed) = SessionGate.onTimeout(gate, now)
+            gate = s
+            confirmedPkg = timeoutConfirmed
+        }
+
+        if (confirmedPkg != null && confirmedPkg != sessionPkg) {
+            ServiceLog.i("会话切换确认(证据=$evidence): $sessionPkg → $confirmedPkg")
+            startSession(confirmedPkg, "")
+        }
+    }
+
     private fun scanOnce() {
         if (!Prefs.isEnabled(this)) return
         if (!isScreenInteractive()) return
+
+        // v1.11：两步确认——扫描本身就是"证据时刻"。真实窗口根节点的包名
+        // 比任何事件都可信：确认挂起的切换 / 否决迟到的劫持事件。
+        // 放在限频之前：切换确认不能被限频拖延（否则挂起超时误确认）。
+        reconcileSessionWithWindows()
 
         val realPkg = sessionPkg ?: return
         // 包名属于系统/自己/桌面/输入法，一律不扫。
