@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        重点：本应用【不申请任何网络权限】（没有 INTERNET）。
+        纯本地运行，不联网、不上传、不收集任何数据，也不会动态下载/注入代码。
+        所有逻辑都在这几个 Kotlin 文件里，可完整审计。
+    -->
+
+    <!--
+        只申请两个权限：
+        1. 忽略电池优化——让用户一键把本应用加入白名单，避免息屏后系统杀掉后台。
+        2. 前台服务——无障碍服务被 ROM 省电策略杀掉是"放一会儿就不跳"的主因之一，
+           前台常驻通知能显著降低被杀概率，被杀后用户也能立刻从通知栏发现。
+        两个权限都只弹系统授权框，不会静默生效，用户可随时在系统设置里撤销。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- v1.8：targetSdk 34 起以 specialUse 类型启动前台服务必须声明此权限，
+         否则 startForeground 抛 SecurityException → 进程崩溃 → 系统把本应用的
+         无障碍服务标记为 crashed 并禁用。这正是 v1.7「第一次都跳不了」的根因：
+         无障碍服务每次一连上就去挂前台通知，一挂就崩，一崩服务就被系统关掉。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- v1.9：开机自检——重启后系统可能"开关在列表里但没真正绑定服务"，
+         开机广播里做一次健康检查+修复（GKD BootReceiver 同款思路）。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- adb 一次性授权（pm grant）后本应用可自行恢复被系统关掉的无障碍开关。
+         普通安装不会获得此权限，声明它只是让 pm grant 有目标可授。 -->
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <application
+        android:allowBackup="false"
+        android:icon="@drawable/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.LiuTiaoTiao">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- 识别记录（诊断）页：只从主界面进入，不对外暴露 -->
+        <activity
+            android:name=".DiagnosticsActivity"
+            android:exported="false"
+            android:label="识别记录" />
+
+        <!-- v1.9：开机/覆盖安装后自检 + 绑定修复 -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            android:isAccessibilityTool="true"（API 31+）声明本服务属于“辅助工具”类别，
+            可减少系统的隐私提醒与部分限制。若你不认同该定性可改为 false，功能不受影响。
+        -->
+        <service
+            android:name=".AdSkipService"
+            android:exported="true"
+            android:foregroundServiceType="specialUse"
+            android:isAccessibilityTool="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!--
+            前台服务（API 34 要求在 manifest 声明类型）。specialUse 的用途说明
+            写在 PROPERTY_SPECIAL_USE_FGS_SUBTYPE 里：本服务是"无障碍工具的
+            常驻状态通知"，不做事、不联网，只为降低进程被杀概率。
+        -->
+        <service
+            android:name=".ForegroundKeeperService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="accessibility_tool_status_notification" />
+        </service>
+
+    </application>
+</manifest>

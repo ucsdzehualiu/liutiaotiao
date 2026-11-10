@@ -1,0 +1,55 @@
+{
+  "_说明": "刘跳跳内置规则。defaultKeywords 是文字关键词，keywordWeights 是权重（分数越高越优先被点），defaultIds 是控件 ID 片段（用于纯图片、无文字的跳过按钮），packages 里可以按包名追加专属规则。改完重新编译安装即可生效。",
+  "_如何新增package规则": "先在 App 首页进入「识别记录」，打开目标 App 让它播一次开屏广告，再回来看那一屏采集到的控件，把跳过按钮的 text 或 id 抄进对应包名的 keywords / ids 数组里。",
+  "_id片段匹配规则": "取 viewIdResourceName 中最后一个 '/' 之后的部分，去掉下划线等符号并转小写后做包含判断。例如片段 splashskip 能命中 com.byted.pangle:id/tt_splash_skip_btn。不要使用裸的 skip，否则会误点播放器的 skip_next（下一首）。",
+
+  "defaultWeight": 20,
+
+  "defaultKeywords": [
+    "跳过广告",
+    "跳过此广告",
+    "点击跳过",
+    "关闭广告",
+    "广告跳过",
+    "跳过",
+    "Skip Ad",
+    "Skip",
+    "×",
+    "✕",
+    "✖"
+  ],
+
+  "keywordWeights": {
+    "跳过广告": 70,
+    "跳过此广告": 70,
+    "关闭广告": 70,
+    "广告跳过": 70,
+    "点击跳过": 65,
+    "跳过": 58,
+    "Skip Ad": 55,
+    "Skip": 35,
+    "关闭": 30,
+    "×": 15,
+    "✕": 15,
+    "✖": 15
+  },
+
+  "defaultIds": [
+    "splashskip",
+    "skipad",
+    "adskip",
+    "skipbtn",
+    "btnskip",
+    "skipview",
+    "skipbutton",
+    "buttonskip",
+    "splashjump",
+    "splashclose",
+    "jumpbtn",
+    "mjumpbtn",
+    "closead",
+    "adclose"
+  ],
+
+  "packages": {}
+}

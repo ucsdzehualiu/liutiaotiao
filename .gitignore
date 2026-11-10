@@ -1,0 +1,14 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+build/
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/app/build/
+# 临时工作目录（历史备份与诊断截图，不属于源码）
+.qwenwork-backup-*/
+.qwenwork-diag/
