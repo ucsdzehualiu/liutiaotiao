@@ -47,6 +47,16 @@ class ScanFilterTest {
     }
 
     @Test
+    fun `honor magicos launcher hiboard is excluded`() {
+        // 真机事故（2026-11-07 日志实锤）：荣耀桌面 com.hihonor.hiboard 的迟到事件
+        // 在点击 QQ音乐跳过按钮 3ms 后到达，把扫描会话劫持成"桌面"，导致复扫
+        // 发现按钮还在却因"包名不符"被丢弃、重试链路被废——偶发不跳的主因之一。
+        assertTrue(excluded("com.hihonor.hiboard"))
+        // 前缀匹配：hiboard 的子包也要排除。
+        assertTrue(excluded("com.hihonor.hiboard.widget"))
+    }
+
+    @Test
     fun `input methods are excluded`() {
         assertTrue(excluded("com.bytedance.android.doubaoime"))
         assertTrue(excluded("com.baidu.input"))
@@ -77,6 +87,9 @@ class ScanFilterTest {
         assertFalse(excluded("com.ss.android.ugc.aweme"))
         assertFalse(excluded("com.tencent.mm"))
         assertFalse(excluded("com.taobao.taobao"))
+        // hihonor 前缀的其他真应用不受 hiboard 规则误伤（hiboard 是完整前缀）。
+        assertFalse(excluded("com.hihonor.phoneservice"))
+        assertFalse(excluded("com.hihonor.health"))
     }
 
     @Test

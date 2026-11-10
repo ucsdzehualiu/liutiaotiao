@@ -36,6 +36,7 @@ object ScanFilter {
         "com.android.launcher",
         "com.android.inputmethods",
         "com.hihonor.android.launcher",
+        "com.hihonor.hiboard", // 荣耀 MagicOS 桌面（真机抓到：它的事件劫持过正在进行的扫描会话）
         "com.huawei.android.launcher",
         "com.miui.home",
         "com.coloros.launcher",

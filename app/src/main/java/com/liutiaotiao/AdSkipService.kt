@@ -130,6 +130,18 @@ class AdSkipService : AccessibilityService() {
         var instance: AdSkipService? = null
             private set
 
+        /** 已知国产桌面包名（动态解析失败时的兜底清单，与 [ScanFilter.SYSTEM_PACKAGE_PREFIXES] 保持一致）。 */
+        private val KNOWN_LAUNCHER_PACKAGES = listOf(
+            "com.hihonor.hiboard", // 荣耀 MagicOS
+            "com.hihonor.android.launcher",
+            "com.huawei.android.launcher",
+            "com.miui.home",
+            "com.coloros.launcher",
+            "com.vivo.launcher",
+            "com.sec.android.app.launcher",
+            "com.android.launcher3"
+        )
+
         /**
          * 服务是否真正连着系统。
          *
@@ -167,6 +179,9 @@ class AdSkipService : AccessibilityService() {
 
     /** 最近一次尝试点击的关键词，用于"目标确认消失"时定位要重置预算的签名。 */
     private var lastAttemptedKeyword = ""
+
+    /** 最近一次尝试点击时目标节点的包名（v1.10：会话劫持纠正用）。 */
+    private var lastAttemptedNodePkg: String? = null
 
     /** 最近一次扫描是否找到了候选，用于判断"广告是否已经消失"。 */
     private var lastScanFoundCandidate = false
@@ -370,7 +385,16 @@ class AdSkipService : AccessibilityService() {
             packageManager.resolveActivity(intent, 0)?.activityInfo?.packageName
         }.getOrNull()
         // 解析到 "android" 说明命中的是系统选择器，不是真正的桌面。
-        val resolved = if (p == null || p == "android") "" else p
+        var resolved = if (p == null || p == "android") "" else p
+        // v1.10：荣耀 MagicOS 的桌面（com.hihonor.hiboard）不带 CATEGORY_HOME
+        // 的 resolve 结果（真机实测解析不到它），动态解析会漏。这里兜底：
+        // 如果本机装着已知国产桌面之一，就把它认作桌面。命中 SYSTEM_PACKAGE_PREFIXES
+        // 本身已能排除，这里再让 isLauncher 判定生效，保证"回桌面清会话"路径正确。
+        if (resolved.isEmpty()) {
+            resolved = KNOWN_LAUNCHER_PACKAGES.firstOrNull { pkg ->
+                runCatching { packageManager.getPackageInfo(pkg, 0) }.isSuccess
+            } ?: ""
+        }
         launcherPkg = resolved
         return resolved
     }
@@ -427,6 +451,7 @@ class AdSkipService : AccessibilityService() {
         totalAttempts = 0
         clickDispatched = false
         lastAttemptedKeyword = ""
+        lastAttemptedNodePkg = null
         lastScanFoundCandidate = false
         lastTraversed = 0
 
@@ -460,6 +485,7 @@ class AdSkipService : AccessibilityService() {
         totalAttempts = 0
         clickDispatched = false
         lastAttemptedKeyword = ""
+        lastAttemptedNodePkg = null
         lastScanFoundCandidate = false
         lastTraversed = 0
         lastStateEventTime = 0L
@@ -607,10 +633,21 @@ class AdSkipService : AccessibilityService() {
 
         // 复核：候选节点必须仍然属于当前会话的 App。切页/多窗口时可能拿到别的窗口
         // 的残留节点，若直接点会把点击落到错误界面（GKD 也有一层 window 匹配校验）。
+        // v1.10 例外：候选正是**上一轮刚点过的目标**（包名+关键词都对得上）时，
+        // 说明会话被系统浮层/桌面的迟到事件劫持了（真机抓到：荣耀桌面 hiboard 的
+        // 事件在点击后 3ms 到达，把 QQ音乐 会话抢走）。此时把会话纠正回候选的包名，
+        // 让"复扫验证→换招重试"链路继续走完，而不是把重试废掉。
         val nodePkg = runCatching { candidate.node.packageName?.toString() }.getOrNull()
         if (nodePkg != null && nodePkg != realPkg) {
-            Log.w(TAG, "候选包名不符已丢弃: node=$nodePkg session=$realPkg")
-            return
+            val isLastTarget = nodePkg == lastAttemptedNodePkg &&
+                candidate.keyword == lastAttemptedKeyword
+            if (isLastTarget) {
+                ServiceLog.w("会话被劫持($realPkg→$nodePkg)，纠正回刚点过的目标继续验证")
+                sessionPkg = nodePkg
+            } else {
+                Log.w(TAG, "候选包名不符已丢弃: node=$nodePkg session=$realPkg")
+                return
+            }
         }
 
         // 目标签名：同一 App 同一关键词视为同一个目标，不受按钮轻微位移影响，
@@ -637,6 +674,7 @@ class AdSkipService : AccessibilityService() {
         val gestureFirst = RetryPolicy.gestureFirstFor(attemptNo)
         val method = RetryPolicy.methodLabel(gestureFirst)
         lastAttemptedKeyword = candidate.keyword
+        lastAttemptedNodePkg = runCatching { candidate.node.packageName?.toString() }.getOrNull()
 
         val dispatched = clickNode(candidate.node, gestureFirst)
 
