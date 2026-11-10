@@ -143,6 +143,19 @@ class AdSkipService : AccessibilityService() {
         )
 
         /**
+         * v1.12：跳过按钮固定在屏幕**底部**的 App 白名单。
+         *
+         * "仅上方区域"准入（默认开）是为防误点设计的，但少数 App 的开屏跳过
+         * 按钮天生在右下角（真机实测：B站 id/count_down，top=89% 屏高），
+         * 一刀切拒绝导致广告永远跳不掉。这里按包名豁免——豁免后其余闸门
+         * （面积/宽高/可见性/负向词/重试上限）全部照常生效，误点风险可控。
+         */
+        private val BOTTOM_BUTTON_PACKAGES = setOf(
+            "tv.danmaku.bili", // 哔哩哔哩：跳过按钮固定右下角
+            "tv.danmaku.bilibilihd"
+        )
+
+        /**
          * 服务是否真正连着系统。
          *
          * 系统设置里"开关是开的"并不代表服务在跑：应用被覆盖安装、进程被
@@ -170,6 +183,17 @@ class AdSkipService : AccessibilityService() {
     private var lastClickAt = 0L
 
     /**
+     * v1.12：**全局**点击静默时间戳（uptime 时钟）。
+     *
+     * v1.10 及之前 `lastClickAt` 是会话状态，`startSession` 会把它归零——
+     * 广告 SDK 包名与宿主包名摇摆导致会话反复重建时，静默期跟着反复失效，
+     * 出现 25ms 连点 3 次的事故（真机日志实锤）。静默期是**防连点**的，
+     * 属于全局安全属性，绝不能随会话重置。`startSession`/`clearSession`
+     * 都不再碰它。
+     */
+    private var globalLastClickAt = 0L
+
+    /**
      * v1.11：会话切换两步确认闸门（[SessionGate]）。
      *
      * state 事件只挂起候选，不立即切换会话；扫描时用真实窗口根节点包名做
@@ -191,6 +215,10 @@ class AdSkipService : AccessibilityService() {
 
     /** 最近一次尝试点击时目标节点的包名（v1.10：会话劫持纠正用）。 */
     private var lastAttemptedNodePkg: String? = null
+
+    /** v1.12：被拒候选的落盘节流——同一「包名|拒绝原因」30 秒内只记一次，防倒计时刷屏。 */
+    private var lastRejectLogKey = ""
+    private var lastRejectLogAt = 0L
 
     /** 最近一次扫描是否找到了候选，用于判断"广告是否已经消失"。 */
     private var lastScanFoundCandidate = false
@@ -471,7 +499,7 @@ class AdSkipService : AccessibilityService() {
         sessionStartAt = SystemClock.uptimeMillis()
         gate = SessionGate.initial(pkg)
         lastScanAt = 0L
-        lastClickAt = 0L
+        // v1.12：lastClickAt 不再随会话重置（globalLastClickAt 才是防连点闸门）。
         attemptsByTarget.clear()
         lastAttemptAtByTarget.clear()
         totalAttempts = 0
@@ -506,7 +534,7 @@ class AdSkipService : AccessibilityService() {
         sessionActivity = ""
         gate = SessionGate.initial()
         lastScanAt = 0L
-        lastClickAt = 0L
+        // v1.12：lastClickAt 不再随会话清零（globalLastClickAt 才是防连点闸门）。
         attemptsByTarget.clear()
         lastAttemptAtByTarget.clear()
         totalAttempts = 0
@@ -736,7 +764,8 @@ class AdSkipService : AccessibilityService() {
         // 同一个目标刚点完，先等一会儿看效果，别在同一帧连点。
         val lastAt = lastAttemptAtByTarget[targetSig] ?: 0L
         if (attempts > 0 && now - lastAt < RETRY_SAME_TARGET_MS) return
-        if (now - lastClickAt < POST_CLICK_QUIET_MS) return
+        // v1.12：静默期用全局时间戳，会话重建不再能绕过（修 25ms 连点事故）。
+        if (now - globalLastClickAt < POST_CLICK_QUIET_MS) return
 
         val attemptNo = attempts + 1
         val gestureFirst = RetryPolicy.gestureFirstFor(attemptNo)
@@ -754,6 +783,7 @@ class AdSkipService : AccessibilityService() {
         if (dispatched) {
             clickDispatched = true
             lastClickAt = now
+            globalLastClickAt = now
             ServiceLog.i(
                 "已点击(第${attemptNo}次/$method): $targetSig bounds=${candidate.bounds.toShortString()}"
             )
@@ -922,7 +952,11 @@ class AdSkipService : AccessibilityService() {
             bottom = bounds.bottom,
             screenWidth = screenWidth,
             screenHeight = screenHeight,
-            topOnly = Prefs.isTopOnly(this)
+            // v1.12：底部按钮白名单。B站等 App 的开屏跳过按钮固定在屏幕右下角
+            // （真机实测 tv.danmaku.bili:id/count_down，top=89% 屏高），被"仅上方
+            // 区域"一刀切拒绝 → 广告全程倒计时自然结束，表现为"点不到"。
+            // 这些包名下放宽 topOnly；其余 App 维持原判，防误点不松懈。
+            topOnly = Prefs.isTopOnly(this) && sessionPkg !in BOTTOM_BUTTON_PACKAGES
         )
 
         val note = if (reject == null) {
@@ -931,6 +965,19 @@ class AdSkipService : AccessibilityService() {
         } else {
             // 记录被拒原因：用户反馈"某个 App 点不到"时，这里能直接看出
             // 是按钮在屏幕下方、还是被判定成了容器。
+            // v1.12：被拒也落持久化日志——用户看不到 logcat，识别记录页的
+            // 运行日志必须能回答"为什么没点"（B站按钮在底部被 topOnly 拒绝
+            // 这类问题，之前只有连电脑才能查）。同一原因 30 秒记一次防刷屏。
+            val rejectKey = "$sessionPkg|${reject.label}"
+            val nowMs = SystemClock.uptimeMillis()
+            if (rejectKey != lastRejectLogKey || nowMs - lastRejectLogAt > 30_000L) {
+                lastRejectLogKey = rejectKey
+                lastRejectLogAt = nowMs
+                ServiceLog.i(
+                    "候选被拒[${reject.label}]: $viewId text=\"$text\" " +
+                        "bounds=${bounds.toShortString()}"
+                )
+            }
             "文字/ID 命中但被拒：${reject.label}"
         }
         // 同时打到 logcat：连上电脑用 `adb logcat -s LiuTiaoTiao` 就能看到
