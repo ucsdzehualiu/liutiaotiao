@@ -63,6 +63,29 @@
             android:text="强烈建议保持开启。跳过按钮几乎都在屏幕上方，限制区域能挡掉信息流里的「跳过」字样、设置页的「自动跳过片头片尾」等绝大多数误点。只有遇到把按钮放在底部的 App 才需要关掉。"
             android:textSize="12sp" />
 
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/ocrSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="16dp"
+            android:paddingBottom="4dp"
+            android:text="④ OCR 兜底（识别控件树读不到的广告）"
+            android:textSize="15sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:lineSpacingExtra="3dp"
+            android:text="部分 App（如 ivy）的开屏广告整屏是视频/图片渲染，无障碍服务物理读不到按钮。开启后：控件树找不到时截图用本地文字识别找「跳过」并点击（每屏最多 2 次，全程本地、不联网）。担心耗电或隐私可关闭。"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/resetStateButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="重置运行状态（恢复到刚安装，保留设置）" />
+
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"

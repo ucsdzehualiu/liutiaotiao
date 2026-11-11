@@ -39,7 +39,38 @@ class SplashPolicyTest {
 
     @Test
     fun `going to launcher clears the session`() {
-        assertEquals(Action.CLEAR, ws("com.miui.home", isLauncher = true))
+        // 无会话或会话已开很久：真正回桌面 → 清。
+        assertEquals(Action.CLEAR, ws("com.miui.home", isLauncher = true, currentPkg = null))
+        assertEquals(
+            Action.CLEAR,
+            ws("com.miui.home", isLauncher = true, currentPkg = app, elapsed = 3_000L)
+        )
+    }
+
+    @Test
+    fun `launcher event within grace period is ignored`() {
+        // v1.16 防抖：会话刚开（宽限期内）的 launcher 事件是桌面残留动画，
+        // 不清会话——否则从桌面点图标打开 App 的瞬间，桌面的动画事件会
+        // 把刚开的会话反复清空（真机实锤的死循环）。
+        assertEquals(
+            Action.IGNORE,
+            ws("com.hihonor.android.launcher", isLauncher = true, currentPkg = app, elapsed = 0L)
+        )
+        assertEquals(
+            Action.IGNORE,
+            ws(
+                "com.hihonor.android.launcher", isLauncher = true,
+                currentPkg = app, elapsed = SplashPolicy.LAUNCHER_CLEAR_GRACE_MS
+            )
+        )
+        // 宽限期一过：正常清（真正回桌面）。
+        assertEquals(
+            Action.CLEAR,
+            ws(
+                "com.hihonor.android.launcher", isLauncher = true,
+                currentPkg = app, elapsed = SplashPolicy.LAUNCHER_CLEAR_GRACE_MS + 1
+            )
+        )
     }
 
     @Test

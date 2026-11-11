@@ -12,6 +12,7 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
+import android.view.Display
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -139,8 +140,7 @@ class AdSkipService : AccessibilityService() {
 
         /** 已知国产桌面包名（动态解析失败时的兜底清单，与 [ScanFilter.SYSTEM_PACKAGE_PREFIXES] 保持一致）。 */
         private val KNOWN_LAUNCHER_PACKAGES = listOf(
-            "com.hihonor.hiboard", // 荣耀 MagicOS
-            "com.hihonor.android.launcher",
+            "com.hihonor.android.launcher", // 荣耀桌面真身（真机 resolve 验证）
             "com.huawei.android.launcher",
             "com.miui.home",
             "com.coloros.launcher",
@@ -161,6 +161,15 @@ class AdSkipService : AccessibilityService() {
             "tv.danmaku.bili", // 哔哩哔哩：跳过按钮固定右下角
             "tv.danmaku.bilibilihd"
         )
+
+        /** v1.14：每会话最多 OCR 截图次数（识别一次几百毫秒+耗电，克制使用）。 */
+        private const val MAX_OCR_PER_SESSION = 2
+
+        /**
+         * v1.15：两次 takeScreenshot 的最小间隔（AOSP 系统限频 333ms + 余量）。
+         * 间隔内的请求系统直接拒（code=3 INTERVAL_TIME_SHORT），不发起反而省事。
+         */
+        private const val SCREENSHOT_MIN_GAP_MS = 500L
 
         /**
          * 服务是否真正连着系统。
@@ -226,6 +235,32 @@ class AdSkipService : AccessibilityService() {
     /** v1.12：被拒候选的落盘节流——同一「包名|拒绝原因」30 秒内只记一次，防倒计时刷屏。 */
     private var lastRejectLogKey = ""
     private var lastRejectLogAt = 0L
+
+    // ---------------- v1.14：OCR 兜底状态 ----------------
+
+    /** 本会话内控件树是否找到过任何候选（找到过就不再动用 OCR）。 */
+    private var foundAnyCandidate = false
+
+    /** 本会话扫描轮数（OCR 触发条件：≥[OcrPolicy.MIN_SCANS] 轮无候选）。 */
+    private var scanCount = 0
+
+    /** OCR 进行中标志（识别是异步的，防止重复截图）。 */
+    @Volatile
+    private var ocrInProgress = false
+
+    /** 本会话 OCR 已尝试次数（每次会话最多截 2 次，控制耗电）。 */
+    private var ocrAttempts = 0
+
+    /**
+     * v1.15：上次 takeScreenshot 的时刻。
+     *
+     * AOSP 规定两次无障碍截图之间至少 333ms
+     * （ACCESSIBILITY_TAKE_SCREENSHOT_REQUEST_INTERVAL_TIMES_MS），间隔内请求
+     * 直接报 code=3（INTERVAL_TIME_SHORT）。真机上 OCR 连续两轮触发时第二
+     * 次必然撞上这个限频。这里记录上次截图时刻，间隔不足 [SCREENSHOT_MIN_GAP_MS]
+     * 就不发起（等下一轮扫描自然到点），而不是白白吃一个失败。
+     */
+    private var lastScreenshotAt = 0L
 
     /** 最近一次扫描是否找到了候选，用于判断"广告是否已经消失"。 */
     private var lastScanFoundCandidate = false
@@ -391,12 +426,12 @@ class AdSkipService : AccessibilityService() {
 
         val now = SystemClock.uptimeMillis()
         when {
-            // v1.11：换包不再立即开会话——挂起等窗口证据（reconcileSessionWithWindows
-            // 在每次扫描时确认）。同包的三种情形仍然直接开会话/续窗。
+            // v1.16：分支顺序修正——null 检查必须在「!=」之前，否则
+            // sessionPkg=null 时走第一分支（挂起），下面的 null 分支永远死代码。
+            sessionPkg == null -> startSession(pkg, "")
             sessionPkg != pkg -> {
                 gate = SessionGate.onWindowState(gate, pkg, now)
             }
-            sessionPkg == null -> startSession(pkg, "")
             !sessionActive() && totalAttempts > 0 &&
                 now - lastClickAt > SESSION_RESET_QUIET_MS -> startSession(pkg, "")
         }
@@ -446,10 +481,10 @@ class AdSkipService : AccessibilityService() {
         }.getOrNull()
         // 解析到 "android" 说明命中的是系统选择器，不是真正的桌面。
         var resolved = if (p == null || p == "android") "" else p
-        // v1.10：荣耀 MagicOS 的桌面（com.hihonor.hiboard）不带 CATEGORY_HOME
-        // 的 resolve 结果（真机实测解析不到它），动态解析会漏。这里兜底：
-        // 如果本机装着已知国产桌面之一，就把它认作桌面。命中 SYSTEM_PACKAGE_PREFIXES
-        // 本身已能排除，这里再让 isLauncher 判定生效，保证"回桌面清会话"路径正确。
+        // v1.16：resolve 失败时按已知国产桌面包名兜底（让 isLauncher 判定生效，
+        // "回桌面清会话"路径正确）。注意：v1.10 曾把 com.hihonor.hiboard 当桌面
+        // ——真机 resolve 验证桌面真身是 com.hihonor.android.launcher
+        // （UniHomeLauncher），hiboard 是智慧助手/负一屏组件，已从清单移除。
         if (resolved.isEmpty()) {
             resolved = KNOWN_LAUNCHER_PACKAGES.firstOrNull { pkg ->
                 runCatching { packageManager.getPackageInfo(pkg, 0) }.isSuccess
@@ -515,6 +550,10 @@ class AdSkipService : AccessibilityService() {
         lastAttemptedNodePkg = null
         lastScanFoundCandidate = false
         lastTraversed = 0
+        // v1.14：OCR 兜底状态随会话重置。
+        foundAnyCandidate = false
+        scanCount = 0
+        ocrAttempts = 0
 
         refreshScreenSize()
         Diagnostics.begin(pkg, activity, screenWidth, screenHeight, Prefs.isTopOnly(this))
@@ -730,9 +769,17 @@ class AdSkipService : AccessibilityService() {
                 else "未找到候选（本次遍历 $lastTraversed 个节点）"
             )
             Log.d(TAG, "未找到候选 pkg=$realPkg 遍历节点=$lastTraversed")
+
+            // v1.14：OCR 兜底——控件树一无所获时，截图用本地 OCR 找"跳过"文字。
+            // 真机实锤：ivy 等 App 的开屏广告整屏 SurfaceView 渲染，控件树里
+            // 只有主界面控件，无障碍物理读不到按钮。决策全部在 [OcrPolicy]
+            // （纯逻辑可单测）：≥3 轮无候选、会话窗内、未点过，才截一次。
+            maybeOcrSkip(realPkg, rules)
             return
         }
         lastScanFoundCandidate = true
+        // 控件树找到过候选 → 本会话不再动用 OCR（OcrPolicy 的触发条件之一）。
+        foundAnyCandidate = true
 
         // 复核：候选节点必须仍然属于当前会话的 App。切页/多窗口时可能拿到别的窗口
         // 的残留节点，若直接点会把点击落到错误界面（GKD 也有一层 window 匹配校验）。
@@ -810,6 +857,165 @@ class AdSkipService : AccessibilityService() {
             val pm = getSystemService(POWER_SERVICE) as? PowerManager
             pm?.isInteractive ?: true
         }.getOrDefault(true)
+
+    // ------------------------------------------------------------------
+    // v1.14：OCR 兜底（SurfaceView/自绘广告）
+    // ------------------------------------------------------------------
+
+    /**
+     * 控件树一无所获时的 OCR 兜底。
+     *
+     * 流程：[OcrPolicy.shouldOcr] 判定 → [takeScreenshot]（API 30+，无障碍
+     * 自带能力）→ ML Kit 中文识别（**bundled 本地模型**，无网络）→
+     * [OcrPolicy.isSkipText] 判定文本块 → 手势点击块中心。
+     *
+     * 约束：
+     *  - 每会话最多 [MAX_OCR_PER_SESSION] 次截图（识别一次几百毫秒+耗电）；
+     *  - 识别异步进行，期间 [ocrInProgress] 置位防重入；
+     *  - 任何异常静默吞掉——OCR 是锦上添花，绝不能带崩主链路。
+     */
+    private fun maybeOcrSkip(pkg: String, rules: RuleSet) {
+        // v1.14：OCR 开关（用户可在首页关闭，隐私/耗电顾虑）。
+        if (!Prefs.isOcrEnabled(this)) return
+        scanCount++
+        if (ocrInProgress) return
+        if (ocrAttempts >= MAX_OCR_PER_SESSION) return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return // takeScreenshot 需要 API 30
+        // v1.15：AOSP 限频——两次截图至少隔 SCREENSHOT_MIN_GAP_MS（系统 333ms 限制
+        // 加余量），间隔内不发起，避免白白吃 code=3 失败。
+        if (SystemClock.uptimeMillis() - lastScreenshotAt < SCREENSHOT_MIN_GAP_MS) return
+        if (!OcrPolicy.shouldOcr(
+                scanCount = scanCount,
+                foundAnyCandidate = foundAnyCandidate,
+                elapsedMs = SystemClock.uptimeMillis() - sessionStartAt,
+                clickDispatched = clickDispatched
+            )
+        ) return
+
+        ocrInProgress = true
+        ocrAttempts++
+        lastScreenshotAt = SystemClock.uptimeMillis()
+        ServiceLog.i("OCR兜底触发: pkg=$pkg 第${scanCount}轮无候选，截图识别")
+
+        runCatching {
+            takeScreenshot(
+                android.view.Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        runCatching { handleOcrScreenshot(screenshot, pkg, rules) }
+                        ocrInProgress = false
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        ServiceLog.w("OCR兜底截图失败: code=$errorCode")
+                        ocrInProgress = false
+                    }
+                }
+            )
+        }.onFailure {
+            ServiceLog.w("OCR兜底截图异常", it)
+            ocrInProgress = false
+        }
+    }
+
+    /** 截图到手：跑 ML Kit 本地识别，命中"跳过"小块就手势点击。 */
+    private fun handleOcrScreenshot(screenshot: ScreenshotResult, pkg: String, rules: RuleSet) {
+        val hardwareBuffer = screenshot.hardwareBuffer
+        val bitmap = runCatching {
+            android.graphics.Bitmap.wrapHardwareBuffer(hardwareBuffer, screenshot.colorSpace)
+        }.getOrNull()
+        if (bitmap == null) {
+            ServiceLog.w("OCR兜底: bitmap 包装失败")
+            hardwareBuffer.close()
+            return
+        }
+
+        // ML Kit 需要软件位图：硬件位图转 ARGB_8888。
+        val softwareBitmap = runCatching {
+            bitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+        }.getOrNull()
+        bitmap.recycle()
+        if (softwareBitmap == null) {
+            ServiceLog.w("OCR兜底: 硬件位图转换失败")
+            hardwareBuffer.close()
+            return
+        }
+
+        // 中文识别器（bundled 本地模型）。正确 API：
+        // TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+        val recognizer = com.google.mlkit.vision.text.TextRecognition.getClient(
+            com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions.Builder().build()
+        )
+        val image = com.google.mlkit.vision.common.InputImage.fromBitmap(softwareBitmap, 0)
+
+        recognizer.process(image)
+            .addOnSuccessListener { result ->
+                runCatching {
+                    val sw = softwareBitmap.width
+                    val sh = softwareBitmap.height
+                    var hitAny = false
+                    for (block in result.textBlocks) {
+                        val text = RuleMatcher.normalize(block.text.trim())
+                        val box: Rect? = block.boundingBox
+                        if (box == null) continue
+                        val ok = OcrPolicy.isSkipText(
+                            normalizedText = text,
+                            left = box.left.toFloat(),
+                            top = box.top.toFloat(),
+                            right = box.right.toFloat(),
+                            bottom = box.bottom.toFloat(),
+                            screenWidth = sw,
+                            screenHeight = sh,
+                            keywords = rules.keywords
+                        )
+                        if (ok) {
+                            hitAny = true
+                            val (x, y) = OcrPolicy.tapPoint(
+                                box.left.toFloat(), box.top.toFloat(),
+                                box.right.toFloat(), box.bottom.toFloat()
+                            )
+                            ServiceLog.i(
+                                "OCR命中「$text」@$x,$y (${box.toShortString()}) → 手势点击"
+                            )
+                            Diagnostics.setOutcome(
+                                "OCR 兜底命中「$text」[${box.toShortString()}]，已手势点击" +
+                                    "（该广告为渲染盲区，控件树读不到）"
+                            )
+                            if (tap(x, y)) {
+                                clickDispatched = true
+                                lastClickAt = SystemClock.uptimeMillis()
+                                globalLastClickAt = lastClickAt
+                                lastAttemptedKeyword = "OCR:$text"
+                            }
+                            break
+                        }
+                    }
+                    // v1.16：识别完成但没命中也记一条（带识别出的文本块数），
+                    // 否则"触发了但没下文"没法排查——是截图失败、识别失败、
+                    // 还是识别了但全被准入拒了，三种情况在日志里要能区分。
+                    if (!hitAny) {
+                        // v1.16b：把每个文本块的内容+位置也记下来（截断防刷屏）。
+                        // 真机实锤：ivy 广告右下角「跳过 5」清晰可见，OCR 识别出
+                        // 26 个块却"未命中"——必须看到 OCR 到底把按钮读成了什么、
+                        // 是文字没对上还是几何准入拒了，才能修。
+                        val details = result.textBlocks.joinToString(" | ") { b ->
+                            val box = b.boundingBox
+                            "\"${b.text.trim().take(12)}\"[${box?.toShortString() ?: "?"}]"
+                        }.take(400)
+                        ServiceLog.i("OCR识别完成未命中(${result.textBlocks.size}块): $details")
+                    }
+                }
+                softwareBitmap.recycle()
+                recognizer.close()
+            }
+            .addOnFailureListener { e ->
+                ServiceLog.w("OCR兜底识别失败", e)
+                softwareBitmap.recycle()
+                recognizer.close()
+            }
+        hardwareBuffer.close()
+    }
 
     private data class Candidate(
         val node: AccessibilityNodeInfo,

@@ -6,7 +6,17 @@
         重点：本应用【不申请任何网络权限】（没有 INTERNET）。
         纯本地运行，不联网、不上传、不收集任何数据，也不会动态下载/注入代码。
         所有逻辑都在这几个 Kotlin 文件里，可完整审计。
+
+        v1.14：ML Kit OCR（bundled 本地模型）的传递依赖会声明 INTERNET/
+        ACCESS_NETWORK_STATE，但 bundled 推理本身完全不需要网络——
+        用 tools:node="remove" 从最终 APK 中强制移除，守住无网络承诺。
     -->
+    <uses-permission
+        android:name="android.permission.INTERNET"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.ACCESS_NETWORK_STATE"
+        tools:node="remove" />
 
     <!--
         只申请两个权限：
@@ -32,6 +42,7 @@
         tools:ignore="ProtectedPermissions" />
 
     <application
+        android:name=".App"
         android:allowBackup="false"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"

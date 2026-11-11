@@ -36,6 +36,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var openSettings: Button
     private lateinit var enableSwitch: SwitchCompat
     private lateinit var topOnlySwitch: SwitchCompat
+    private lateinit var ocrSwitch: SwitchCompat
+    private lateinit var resetStateButton: Button
     private lateinit var keywordInput: EditText
     private lateinit var chipContainer: FlowLayout
     private lateinit var keywordCount: TextView
@@ -74,6 +76,8 @@ class MainActivity : AppCompatActivity() {
         openSettings = findViewById(R.id.openSettings)
         enableSwitch = findViewById(R.id.enableSwitch)
         topOnlySwitch = findViewById(R.id.topOnlySwitch)
+        ocrSwitch = findViewById(R.id.ocrSwitch)
+        resetStateButton = findViewById(R.id.resetStateButton)
         keywordInput = findViewById(R.id.keywordInput)
         chipContainer = findViewById(R.id.keywordChips)
         keywordCount = findViewById(R.id.keywordCount)
@@ -104,6 +108,20 @@ class MainActivity : AppCompatActivity() {
 
         topOnlySwitch.isChecked = Prefs.isTopOnly(this)
         topOnlySwitch.setOnCheckedChangeListener { _, value -> Prefs.setTopOnly(this, value) }
+
+        // v1.14：OCR 兜底开关（渲染盲区广告的截图识别）。
+        ocrSwitch.isChecked = Prefs.isOcrEnabled(this)
+        ocrSwitch.setOnCheckedChangeListener { _, value -> Prefs.setOcrEnabled(this, value) }
+
+        // v1.14：重置运行状态——清空识别记录/运行日志/会话状态并重绑服务，
+        // 恢复到"刚安装"的样子；用户设置（开关/关键词）全部保留。
+        resetStateButton.setOnClickListener {
+            Prefs.resetRuntimeState(this)
+            // 摘除再写回无障碍开关，强迫系统重新绑定服务进程（清空全部内存状态）。
+            runCatching { AccessibilitySwitch.scheduleRebind(this, "用户重置状态") }
+            toast("已重置运行状态，服务正在重新连接…")
+            updateStatus()
+        }
 
         findViewById<Button>(R.id.openDiagnostics).setOnClickListener {
             startActivity(Intent(this, DiagnosticsActivity::class.java))

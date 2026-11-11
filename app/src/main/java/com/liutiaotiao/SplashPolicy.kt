@@ -18,6 +18,15 @@ package com.liutiaotiao
  */
 object SplashPolicy {
 
+    /**
+     * v1.16：会话开启后 launcher 事件不清会话的宽限期。
+     *
+     * 从桌面点图标打开 App 的瞬间，桌面的动画/收起事件会陆续到达，
+     * 每条都触发 CLEAR 会把刚开的会话反复清空（死循环，见 onWindowState
+     * 的注释）。宽限期内视为残留动画忽略。
+     */
+    const val LAUNCHER_CLEAR_GRACE_MS = 2_500L
+
     /** 一次事件应引发的动作。 */
     enum class Action {
         /** 开一个新的扫描会话（重置计时与点击预算）。 */
@@ -56,7 +65,20 @@ object SplashPolicy {
         if (pkg.isNullOrEmpty()) return Action.IGNORE
         // 回到桌面：明确离开业务界面，清空会话。这样下次再进同一个 App，
         // 哪怕只收到 content-changed 也能被识别成"新开屏"。
-        if (isLauncher) return Action.CLEAR
+        //
+        // v1.16 防抖：真机实锤（2026-11-11 持久化日志）——从桌面点图标打开
+        // App 的瞬间，桌面自己的**动画/收起事件**会陆续到达（间隔几十毫秒），
+        // 每条都触发 CLEAR → clearSession → 会话被反复清空 → App 的 content
+        // 事件又把会话挂起 → 扫描时证据确认重建 → 桌面下一条动画事件又 CLEAR
+        // ——死循环。每圈 startSession 都重置点击预算/OCR 计数/时间窗，扫描
+        // 永远在"刚开会话"状态打转，广告永远点不到。
+        // 修复：会话开启后 [LAUNCHER_CLEAR_GRACE_MS] 内的 launcher 事件视为
+        // 残留动画，不清会话（真正回桌面时，用户从点开 App 到回桌面远超此窗）。
+        if (isLauncher) {
+            val inGrace = currentPkg != null && elapsedMs >= 0 &&
+                elapsedMs <= LAUNCHER_CLEAR_GRACE_MS
+            return if (inGrace) Action.IGNORE else Action.CLEAR
+        }
         // 输入法/系统浮层等：可能只是盖在 App 上的一层，不能清会话，
         // 否则一次通知浮层就会打断正在进行中的开屏扫描。
         if (excluded || nonActivityClass) return Action.IGNORE
