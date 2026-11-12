@@ -11,8 +11,8 @@ android {
         applicationId = "com.liutiaotiao"
         minSdk = 24
         targetSdk = 34
-        versionCode = 17
-        versionName = "1.16"
+        versionCode = 18
+        versionName = "1.17"
     }
 
     buildTypes {
@@ -20,7 +20,7 @@ android {
             // 不混淆、不压缩：保证代码可审计，源码与你看到的完全一致，
             // 也能最大限度避免被安全软件误判为“加壳/混淆”的病毒。
             isMinifyEnabled = false
-            isShrinkResources = false
+
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

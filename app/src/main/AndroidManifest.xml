@@ -65,14 +65,19 @@
             android:exported="false"
             android:label="识别记录" />
 
-        <!-- v1.9：开机/覆盖安装后自检 + 绑定修复 -->
+        <!-- v1.17：关键时刻自检 + 绑定修复。
+             亮屏/解锁（USER_PRESENT）是用户开广告 App 的必经时点——荣耀省电
+             杀进程摘开关后，只有 manifest 广播能在进程死掉时叫醒我们做修复。 -->
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.USER_PRESENT" />
             </intent-filter>
         </receiver>
 

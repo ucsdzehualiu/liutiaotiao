@@ -252,6 +252,18 @@ class AdSkipService : AccessibilityService() {
     private var ocrAttempts = 0
 
     /**
+     * v1.17：本会话是否是「从别的包切换过来」建立的。
+     *
+     * OCR 只对"疑似开屏"的场景截屏（隐私+耗电）。判据：
+     *  - 会话由**换包**建立（从桌面/别的 App 打开）→ 疑似开屏，允许 OCR；
+     *  - 会话由**同包恢复**建立（后台切回，如视频播放器）→ 不是开屏，
+     *    禁止 OCR——真机实锤：用户从别的 App 切回腾讯会议投屏，OCR 截了
+     *    播放画面，既无意义又涉隐私。
+     * 冷启动（进程被杀后重开）时 sessionPkg 从 null 切来，也算换包。
+     */
+    private var sessionFromSwitch = false
+
+    /**
      * v1.15：上次 takeScreenshot 的时刻。
      *
      * AOSP 规定两次无障碍截图之间至少 333ms
@@ -536,6 +548,9 @@ class AdSkipService : AccessibilityService() {
         stopScanLoop()
         cancelAuxScans()
 
+        // v1.17：记录会话来源——换包（从别的 App/桌面/null 切来）= 疑似开屏，
+        // 允许 OCR；同包重建（超时重开/预算重置）= 不是新开屏，禁止 OCR。
+        sessionFromSwitch = pkg != sessionPkg
         sessionPkg = pkg
         sessionActivity = activity
         sessionStartAt = SystemClock.uptimeMillis()
@@ -877,6 +892,9 @@ class AdSkipService : AccessibilityService() {
     private fun maybeOcrSkip(pkg: String, rules: RuleSet) {
         // v1.14：OCR 开关（用户可在首页关闭，隐私/耗电顾虑）。
         if (!Prefs.isOcrEnabled(this)) return
+        // v1.17：只有「换包建立的会话」（疑似开屏）才允许截屏。
+        // 同包恢复（后台切回视频播放器等）绝不截。
+        if (!sessionFromSwitch) return
         scanCount++
         if (ocrInProgress) return
         if (ocrAttempts >= MAX_OCR_PER_SESSION) return

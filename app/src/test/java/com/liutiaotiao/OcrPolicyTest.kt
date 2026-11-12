@@ -33,9 +33,9 @@ class OcrPolicyTest {
 
     @Test
     fun `ocr only within splash window`() {
-        // v1.16 收紧到 4s：切回后台已久的视频播放器等场景不截屏。
-        assertFalse(OcrPolicy.shouldOcr(scanCount = 10, foundAnyCandidate = false, elapsedMs = 4_001, clickDispatched = false))
-        assertTrue(OcrPolicy.shouldOcr(scanCount = 10, foundAnyCandidate = false, elapsedMs = 4_000, clickDispatched = false))
+        // v1.17：窗口回到 6s（隐私关口由调用方 sessionFromSwitch 承担）。
+        assertFalse(OcrPolicy.shouldOcr(scanCount = 10, foundAnyCandidate = false, elapsedMs = 6_001, clickDispatched = false))
+        assertTrue(OcrPolicy.shouldOcr(scanCount = 10, foundAnyCandidate = false, elapsedMs = 6_000, clickDispatched = false))
     }
 
     // ---------------- isSkipText ----------------

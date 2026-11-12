@@ -109,7 +109,7 @@ object AccessibilitySwitch {
 
     /**
      * **完整的健康检查 + 修复**。调用方：MainActivity 每秒刷新、前台服务心跳、
-     * 开机广播。
+     * 开机/解锁广播、应用心跳。
      *
      * 三种坏状态都能处理：
      *  - 开关被摘 → [reRegister] 写回；
@@ -118,9 +118,10 @@ object AccessibilitySwitch {
      *  - 一切正常 → 什么都不做。
      *
      * @param why 调用来源（写日志定位用）
+     * @param urgent v1.17：紧急场景（解锁自检）强制立即修复，绕过节流
      * @return true = 当前健康（开关在 + 服务连着），或已发起修复
      */
-    fun ensureBound(context: Context, why: String): Boolean {
+    fun ensureBound(context: Context, why: String, urgent: Boolean = false): Boolean {
         val registered = isRegistered(context)
         val connected = AdSkipService.isConnected()
 
@@ -135,7 +136,7 @@ object AccessibilitySwitch {
         }
 
         // 开关在、服务没连上：需要摘除重绑。
-        scheduleRebind(context, why)
+        scheduleRebind(context, why, force = urgent)
         return true // 修复已发起
     }
 
@@ -144,14 +145,18 @@ object AccessibilitySwitch {
      *
      * 节流：两次修复至少间隔 [FIX_MIN_INTERVAL_MS]（[FixGate]），
      * 防止"绑定途中又被摘一次"打断本来能成功的绑定。
+     *
+     * v1.17：[force] 参数——解锁自检（用户马上要开广告 App）必须立刻修，
+     * 不能被节流挡住：用户息屏→亮屏间隔可能很短，但每次亮屏都可能是
+     * "荣耀刚杀完进程摘完开关"之后的第一次，慢一拍广告就放完了。
      */
-    fun scheduleRebind(context: Context, why: String) {
+    fun scheduleRebind(context: Context, why: String, force: Boolean = false) {
         if (!canSelfRepair(context)) {
             ServiceLog.w("需要重绑但无 WRITE_SECURE_SETTINGS 授权，请手动关开一次开关")
             return
         }
         val now = SystemClock.uptimeMillis()
-        if (!FixGate.canAttempt(now, lastFixAt)) {
+        if (!force && !FixGate.canAttempt(now, lastFixAt)) {
             ServiceLog.i("修复节流中($why)，稍后再试")
             return
         }
