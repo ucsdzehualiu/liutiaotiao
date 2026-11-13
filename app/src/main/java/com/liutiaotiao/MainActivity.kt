@@ -306,6 +306,16 @@ class MainActivity : AppCompatActivity() {
             selfRepairTip.setTextColor(Color.parseColor("#D98324"))
             copyAdbButton.visibility = View.VISIBLE
         }
+
+        // v1.18：荣耀等 ROM 的「应用启动管理」引导——这层权限系统不开放给
+        // 第三方检测，只能引导用户手动设置。没关「自动管理」时 ROM 会杀后台
+        // +摘无障碍开关，是我们反复自愈也追不上的根源。
+        val honorTip = findViewById<TextView>(R.id.honorStartupTip)
+        honorTip.text = "📱 荣耀/华为手机必做（防止系统杀后台）：\n" +
+            "设置 → 应用 → 刘跳跳 → 启动管理 → 关闭「自动管理」，\n" +
+            "手动允许全部三项（自启动/关联启动/后台活动）。\n" +
+            "系统设置 → 电池 → 应用启动管理，同样关闭刘跳跳的自动管理。"
+        honorTip.setTextColor(Color.parseColor("#D98324"))
     }
 
     private fun isIgnoringBatteryOptimizations(): Boolean =

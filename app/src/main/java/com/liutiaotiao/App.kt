@@ -46,6 +46,10 @@ class App : Application() {
         override fun run() {
             runCatching {
                 AccessibilitySwitch.ensureBound(this@App, "应用心跳")
+                // v1.18：overlay 若因系统未就绪没挂上，心跳里重试。
+                AdSkipService.instance?.let { svc ->
+                    runCatching { KeepAliveOverlay.attach(svc) }
+                }
             }.onFailure { ServiceLog.w("应用心跳检查失败", it) }
             handler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
         }

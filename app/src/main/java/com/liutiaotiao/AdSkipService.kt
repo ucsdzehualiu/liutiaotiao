@@ -308,6 +308,7 @@ class AdSkipService : AccessibilityService() {
     override fun onUnbind(intent: Intent?): Boolean {
         clearSession()
         Diagnostics.flush()
+        KeepAliveOverlay.detach()
         ServiceLog.w("无障碍服务被解绑(onUnbind)，等待系统重绑")
         if (instance === this) instance = null
         // 服务断开时撤掉常驻通知，保证通知与真实状态一致。
@@ -326,6 +327,10 @@ class AdSkipService : AccessibilityService() {
         refreshScreenSize()
         clearSession()
         repository() // 预热，失败也不影响后续
+        // v1.18：挂 1px 保活 overlay（GKD 同款）——TYPE_ACCESSIBILITY_OVERLAY
+        // 不需要悬浮窗权限，系统省电策略对"有窗口在渲染"的进程有豁免。
+        // 失败（系统未就绪）由下一次 onServiceConnected/心跳重试。
+        runCatching { KeepAliveOverlay.attach(this) }
         // 挂前台常驻通知：降低进程被 ROM 省电策略杀掉的概率（"放一会儿就不跳"的
         // 主因之一），被杀时通知消失、用户能立刻发现。
         // v1.8：包 runCatching——前台服务一旦抛异常（v1.7 的 SecurityException 教训），
@@ -522,6 +527,7 @@ class AdSkipService : AccessibilityService() {
         super.onDestroy()
         clearSession()
         Diagnostics.flush()
+        KeepAliveOverlay.detach()
         ServiceLog.w("无障碍服务销毁(onDestroy)")
         if (instance === this) instance = null
         runCatching { ForegroundKeeperService.stop(this) }
@@ -889,12 +895,37 @@ class AdSkipService : AccessibilityService() {
      *  - 识别异步进行，期间 [ocrInProgress] 置位防重入；
      *  - 任何异常静默吞掉——OCR 是锦上添花，绝不能带崩主链路。
      */
+    /**
+     * v1.18：该包是否有桌面图标入口（LAUNCHER Activity）。
+     *
+     * OCR 只对「用户主动从桌面点开的 App」截屏。负一屏（hiboard）、时钟
+     * 小部件（deskclock）、系统浮层都没有 LAUNCHER 入口——即使它们的事件
+     * 建立了会话，也绝不该截屏（真机实锤：OCR 曾在桌面时钟上疯狂截图）。
+     * 结果缓存（包管理查询是跨进程调用）。
+     */
+    private val launcherEntryCache = HashMap<String, Boolean>()
+
+    private fun hasLauncherEntry(pkg: String): Boolean {
+        launcherEntryCache[pkg]?.let { return it }
+        val has = runCatching {
+            val intent = packageManager.getLaunchIntentForPackage(pkg)
+            intent != null
+        }.getOrDefault(false)
+        launcherEntryCache[pkg] = has
+        return has
+    }
+
     private fun maybeOcrSkip(pkg: String, rules: RuleSet) {
         // v1.14：OCR 开关（用户可在首页关闭，隐私/耗电顾虑）。
         if (!Prefs.isOcrEnabled(this)) return
         // v1.17：只有「换包建立的会话」（疑似开屏）才允许截屏。
         // 同包恢复（后台切回视频播放器等）绝不截。
         if (!sessionFromSwitch) return
+        // v1.18：只有「用户主动打开的 App」才允许截屏——该包必须有
+        // LAUNCHER 入口（桌面图标能点开）。真机实锤：负一屏（hiboard）、
+        // 时钟小部件（deskclock）会建立会话并触发 OCR，截的是桌面时钟——
+        // 既无意义又涉隐私。系统组件没有 LAUNCHER 入口，天然被挡。
+        if (!hasLauncherEntry(pkg)) return
         scanCount++
         if (ocrInProgress) return
         if (ocrAttempts >= MAX_OCR_PER_SESSION) return
