@@ -155,6 +155,10 @@ class MainActivity : AppCompatActivity() {
         renderChips()
         // Android 13+ 通知权限：没它前台常驻通知显示不出来，进程保护形同虚设。
         requestNotificationPermissionIfNeeded()
+        // v1.19：保活三件套的主动请求——电池白名单没加就弹系统授权框
+        // （REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 是标准接口，所有 ROM 都有），
+        // 不等用户自己去找按钮。
+        requestKeepAliveIfNeeded()
     }
 
     override fun onPause() {
@@ -279,8 +283,8 @@ class MainActivity : AppCompatActivity() {
     // ------------------------------------------------------------------
 
     private fun updateBatterySection() {
-        val whitelisted = isIgnoringBatteryOptimizations()
-        if (whitelisted) {
+        val batteryWhitelisted = isIgnoringBatteryOptimizations()
+        if (batteryWhitelisted) {
             batteryTip.text = "✅ 已加入电池优化白名单，系统不会为了省电杀掉服务。"
             batteryTip.setTextColor(Color.parseColor("#2E9E5B"))
             batteryButton.visibility = View.GONE
@@ -310,12 +314,33 @@ class MainActivity : AppCompatActivity() {
         // v1.18：荣耀等 ROM 的「应用启动管理」引导——这层权限系统不开放给
         // 第三方检测，只能引导用户手动设置。没关「自动管理」时 ROM 会杀后台
         // +摘无障碍开关，是我们反复自愈也追不上的根源。
+        // v1.19：泛化文案（不只荣耀/华为——小米/OPPO/vivo 同样有启动管理），
+        // 并做成「保活状态检查」：电池白名单 + adb 自愈授权 + 启动管理引导
+        // 三项全过才显示 ✅，缺哪项提示哪项。
         val honorTip = findViewById<TextView>(R.id.honorStartupTip)
-        honorTip.text = "📱 荣耀/华为手机必做（防止系统杀后台）：\n" +
-            "设置 → 应用 → 刘跳跳 → 启动管理 → 关闭「自动管理」，\n" +
-            "手动允许全部三项（自启动/关联启动/后台活动）。\n" +
-            "系统设置 → 电池 → 应用启动管理，同样关闭刘跳跳的自动管理。"
-        honorTip.setTextColor(Color.parseColor("#D98324"))
+        val whitelisted = isIgnoringBatteryOptimizations()
+        val authorized = AccessibilitySwitch.canSelfRepair(this)
+        honorTip.text = when {
+            whitelisted && authorized -> {
+                "✅ 后台保活已就绪：电池白名单 ✓ 自动恢复授权 ✓\n" +
+                    "若仍被系统杀后台，请到 设置→应用→刘跳跳→启动管理 " +
+                    "关闭「自动管理」（各品牌路径类似：小米=省电策略→无限制；" +
+                    "OPPO/vivo=后台耗电管理→允许）。"
+            }
+
+            else -> "📱 防杀后台必做（各品牌通用）：\n" +
+                "① 点上方按钮加入电池优化白名单" +
+                (if (whitelisted) "（已完成 ✓）" else "") + "\n" +
+                "② 电脑上 adb 授权自动恢复" +
+                (if (authorized) "（已完成 ✓）" else "（点下方复制命令）") + "\n" +
+                "③ 设置 → 应用 → 刘跳跳 → 启动管理 → 关闭「自动管理」，" +
+                "手动允许全部三项（自启动/关联启动/后台活动）。\n" +
+                "（小米：省电策略→无限制；OPPO/vivo：后台耗电管理→允许后台运行）"
+        }
+        honorTip.setTextColor(
+            if (whitelisted && authorized) Color.parseColor("#2E9E5B")
+            else Color.parseColor("#D98324")
+        )
     }
 
     private fun isIgnoringBatteryOptimizations(): Boolean =
@@ -323,6 +348,24 @@ class MainActivity : AppCompatActivity() {
             val pm = getSystemService(POWER_SERVICE) as? PowerManager
             pm?.isIgnoringBatteryOptimizations(packageName) ?: true
         }.getOrDefault(true)
+
+    /**
+     * v1.19：进 App 时主动弹「允许忽略电池优化」系统授权框。
+     *
+     * 用户反馈「应该自己弄请求权限」——对。电池白名单是保活三件套里唯一
+     * 能程序化申请的（标准接口，所有 ROM 都有），第一次进 App 就弹框，
+     * 用户点一下「允许」即完成，不用自己去找按钮。弹框只在未加白名单时
+     * 出现，加过就不再打扰。
+     */
+    private fun requestKeepAliveIfNeeded() {
+        if (isIgnoringBatteryOptimizations()) return
+        // 只在本次会话弹一次（onResume 可能反复触发，别骚扰）。
+        if (keepAliveRequested) return
+        keepAliveRequested = true
+        requestIgnoreBatteryOptimizations()
+    }
+
+    private var keepAliveRequested = false
 
     private fun requestIgnoreBatteryOptimizations() {
         try {
